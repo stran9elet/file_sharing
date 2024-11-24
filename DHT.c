@@ -70,6 +70,7 @@ int cmp_distance(unsigned char *dist1, unsigned char *dist2){
 // return will be an array of atmost k nodes sorted from closest to farthest
 // use lock when accessing the routing table
 int find_node(unsigned char *hash, struct node k_closest[K]){
+    printf("Finding locally k closest nodes in the routing table\n");
     unsigned char *distances[K]; // an array of size k
     // each element is a pointer to an array of unsigned char distances of length SHA_DIGEST_LENGTH
     for (int i = 0; i < K; i++) {
@@ -79,6 +80,7 @@ int find_node(unsigned char *hash, struct node k_closest[K]){
 
     unsigned char *dist;
     struct node myself;
+    intialize_node(&myself);
     for (int i=0; i<SHA_DIGEST_LENGTH; i++)
         myself.node_id[i] = id[i]; // not adding the IP address because OS doesn't know self's IP. So the calling node will have to determine that from his own routing table since he called me directly and must've known my address
 
@@ -141,6 +143,7 @@ int find_node(unsigned char *hash, struct node k_closest[K]){
     }
 
     break_links(k_closest, K);
+    printf("Found\n");
     return last_idx+1;
 }
 
@@ -148,6 +151,7 @@ int find_node(unsigned char *hash, struct node k_closest[K]){
 
 // return 1 if found, else 0
 int find_k_closest_worker(unsigned char *hash, struct node k_closest[K]){
+    printf("Finding globally k closest nodes\n");
     struct node new_k_closest[K];
 
     // this DHT assumes nodes are not constantly leaving the network. That's why i assume k_closest[0] node was active and didn't try further nodes
@@ -185,49 +189,28 @@ int find_k_closest_worker(unsigned char *hash, struct node k_closest[K]){
 }
 
 
+// recursively call find_node to find the globally closest k nodes to a given hash
+// first find the closest node to that hash in your routing table
+// then recursively query closest nodes received with find node
 void find_k_closest(unsigned char *hash, struct node k_closest_global[K]) {
     find_node(hash, k_closest_global);
+    for (int i=0; i<K; i++){
+        printf("port: %d\n", k_closest_global[i].port);
+    }
     find_k_closest_worker(hash, k_closest_global);
+    for (int i=0; i<K; i++){
+        printf("port: %d\n", k_closest_global[i].port);
+    }
 }
 
 
 
-// recursively call find_node to find the globally closest k nodes to a given hash
-// first find the closest node to that hash in your routing table
-// then recursively query closest nodes received with find node
-// void find_k_closest(unsigned char *hash, struct node k_closest_global[K]){
-//     struct node k_closest[K];
-//     for (int i=0; i<K; i++){
-//         intialize_node(&k_closest[i]);
-//         intialize_node(&k_closest[i]);
-//     }
-
-//     int max_retries = 100;
-//     for(int t=0; t<max_retries; t++){
-
-//         // connect to each node in the previous k_closest set, and ask them for find_node to return you its local k closest nodes
-//         // net_find_node(hash, k_closest_global);
-
-//         int global_found = 1;
-//         for (int i=0; i<K; i++){
-//             if (cmp_distance(&k_closest[i], &k_closest_global[i]) == 0){
-//                 // same nodes
-//             } else {
-//                 global_found = 0;
-//                 break;
-//             }
-//         }
-
-//         if (global_found)
-//             return;
-
-//         for (int i=0; i<K; i++){
-//             copy_node(&k_closest_global[i], &k_closest[i]);
-//         }
-
-//     }
-
-// }
+void print_hash(unsigned char *hash){
+    for (int i=0; i<20; i++){
+        printf("%u ", hash[i]);
+    }
+    printf("\n");
+}
 
 
 void generate_id(unsigned char *id){
@@ -239,21 +222,29 @@ void generate_id(unsigned char *id){
             id[i] = rand() & 0xFF;
         }
 
+        printf("Generated id: ");
+        print_hash(id);
+
         // find out which nodes are closest to given id
         // if our id is already a part of the array received, then generate a new id
         int already_exists = 0;
         struct node k_nearest[K];
+        for(int i=0; i<K; i++){
+            intialize_node(&k_nearest[i]);
+        }
+        printf("Finding k closest nodes to generate id...\n");
         find_k_closest(id, k_nearest);
-        for (int j=0; j<K; j++){
-            unsigned char dist[SHA_DIGEST_LENGTH];
-            if (cmp_distance(id, k_nearest[j].node_id) == 0){
-                already_exists = 1;
-                break;
-            }
+
+        printf("My id: ");
+        print_hash(id);
+
+        // because k_nearest[0] will always be my own node id
+        if (cmp_distance(id, k_nearest[1].node_id) != 0){
+            break;
         }
 
-        if (!already_exists)
-            break;
+        printf("%d\n", already_exists);
+        // sleep(10);
     }
 }
 
@@ -577,22 +568,27 @@ int main(int argc, char **argv) {
     }
 
     // initialize the routing table
+    printf("Initializeing routing table\n");
     for (int i=0; i<ROUTING_TABLE_SIZE; i++){
         routing_table[i] = NULL;
     }
 
     if (bootstrap){
         // generate your own id
-        generate_id(id);
-
+        printf("Generating ID\n");
+        unsigned char tempid[SHA_DIGEST_LENGTH];
+        generate_id(tempid);
+        for (int i=0; i<SHA_DIGEST_LENGTH; i++){
+            id[i] = tempid[i];
+        }
     } else {
         // request id from a bootstrap node
+        printf("Requesting ID from bootstrap\n");
         net_request_id(bootstrap_ip, bootstrap_port, id);
     }
 
     printf("Got Id: ");
-    for (int i=0; i<SHA_DIGEST_LENGTH; i++)
-        printf("%c", id[i]);
+    print_hash(id);
     printf("\n");
 
 
