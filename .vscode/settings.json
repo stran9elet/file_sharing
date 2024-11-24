@@ -1,6 +1,8 @@
 {
     "files.associations": {
         "*.ejs": "html",
-        "threadpool.h": "c"
+        "threadpool.h": "c",
+        "*.tcc": "c",
+        "string": "c"
     }
 }

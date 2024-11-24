@@ -32,14 +32,16 @@ unsigned short int bootstrap_port;;
 // that's why it is of size SHA_DIGEST_LENGTH*8, i.e. 160, i.e. the height of the tree
 // because there is 1 subtree which differes at path bit 1, one subtree which differs at bit 2, one subtree which differs at bit 3, and so on upto bit 160
 struct node *routing_table[ROUTING_TABLE_SIZE];
+pthread_mutex_t routing_table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 struct ThreadPool {
     pthread_t *threads;
     int *clientqueue; // a circular queue of client fds
+    struct sockaddr_in **clientaddqueue; // will store socket addresses of clients in client queue
     long clientqueue_length;
     long threadcount;
     pthread_mutex_t lock;
-    pthread_cond_t is_empty;
+    pthread_cond_t is_not_empty;
     long head;
     long tail; // here tail represents index of last element
 };
@@ -63,108 +65,154 @@ int cmp_distance(unsigned char *dist1, unsigned char *dist2){
     return 0;
 }
 
-void copy_node(struct node *src, struct node *dest){
-    dest->node_addr = src->node_addr;
-    dest->node_id = src->node_id;
-    dest->next = src->next;
-}
-
 
 // find the k nearest nodes to a given hash from our own routing table
-// return will be an array of atmost k node pointers sorted from closest to farthest
+// return will be an array of atmost k nodes sorted from closest to farthest
 // use lock when accessing the routing table
-int find_node(unsigned char *hash, struct node *k_closest[K]){
+int find_node(unsigned char *hash, struct node k_closest[K]){
 
     unsigned char *distances[K]; // an array of size k
     // each element is a pointer to an array of unsigned char distances of length SHA_DIGEST_LENGTH
     for (int i = 0; i < K; i++) {
-        k_closest[i] = NULL;
+        intialize_node(&k_closest[i]);
         distances[i] = NULL;
     }
 
     unsigned char *dist;
-
     struct node *cur;
 
     int last_idx = -1;
 
     // check your own routing table to find atmost the k closest nodes you know to the hash
+    pthread_mutex_lock(&routing_table_lock);
     for (int i=0; i<ROUTING_TABLE_SIZE; i++){
-        cur = routing_table[i]; // the first node is the closest, and the last Kth one is the farthest
-        if (cur == NULL)
+
+        if (routing_table[i] == NULL)
             continue;
+
+        // need to get lock to make sure tha when i am reading the routing table, some other thread doosn't modify it
+        cur = routing_table[i];
+
 
         for (int j=0; j<K && cur != NULL; j++){
             dist = (unsigned char*) malloc(SHA_DIGEST_LENGTH * sizeof(unsigned char));
             xor_distance(hash, cur->node_id, dist);
 
-            int replace_pos = 0;
-            for (replace_pos=0; replace_pos <= last_idx; replace_pos++){
-                if (cmp_distance(dist, distances[replace_pos]) <= 0)
+            int insert_pos = 0;
+            for (insert_pos=0; insert_pos <= last_idx; insert_pos++){
+                if (cmp_distance(dist, distances[insert_pos]) <= 0)
                     break;
             }
 
-            struct node *curcopy = cur;
-
-            while (replace_pos < K){
-                unsigned char *temp = distances[replace_pos];
-                struct node *tempnode = k_closest[replace_pos];
-
-                distances[replace_pos] = dist;
-                k_closest[replace_pos] = curcopy;
-
-                dist = temp;
-                curcopy = tempnode;
-
-                if (replace_pos == last_idx+1){
-                    last_idx++;
-                    break;
-                }
-
-                replace_pos++;
-            }
-
-            if (replace_pos >= K)
+            if (insert_pos == K)
                 free(dist);
+            else if (insert_pos < K){
+                if (last_idx == K-1)
+                    free(distances[K-1]);
+                else
+                    last_idx++;
+
+                for (int l=last_idx; l>insert_pos; l--){
+                    distances[l] = distances[l-1];
+                    copy_node(&k_closest[l-1], &k_closest[l]);
+                }
+                distances[insert_pos] = dist;
+                copy_node(cur, &k_closest[insert_pos]);
+            }
 
             cur = cur->next;
-
         }
     }
+    pthread_mutex_unlock(&routing_table_lock);
+
 
     for (int i=0; i<K; i++){
         if (distances[i] != NULL)
             free(distances[i]);
     }
 
+    break_links(k_closest, K);
     return last_idx+1;
 }
 
 
-// recursively call find_node to find the globally closest k nodes to a given hash
-void find_k_closest(unsigned char *hash, struct node *k_closest_global[K]){
-    struct node *k_closest[K];
+
+
+void find_k_closest(unsigned char *hash, struct node k_closest_global[K]) {
+    find_node(hash, k_closest_global);
+    find_k_closest_worker(hash, k_closest_global);
+}
+
+// return 1 if found, else 0
+int find_k_closest_worker(unsigned char *hash, struct node k_closest[K]){
+    struct node new_k_closest[K];
     for (int i=0; i<K; i++){
-        k_closest[i] = NULL;
-        k_closest_global[i] = NULL;
-    }
+        char ip[16]; // Buffer to store the dotted-decimal format string
+        sprintf(ip, "%d.%d.%d.%d", k_closest[i].ip[0], k_closest[i].ip[2], k_closest[i].ip[1], k_closest[i].ip[3]);
+        net_find_node(ip, k_closest[i].port, hash, new_k_closest);
 
-    int max_retries = 100;
-    for(int t=0; t<max_retries; t++){
-        // connect to each node in the previous k_closest set, and ask them for find_node to return you its local k closest nodes
-        find_node(hash, k_closest);
-
+        // if new k closest same as old k closest, return
         int global_found = 1;
         for (int i=0; i<K; i++){
-            if (!((k_closest[i] == NULL && k_closest_global[i] == NULL) || cmp_distance(k_closest[i], k_closest_global[i]) == 0)){
+            if (cmp_distance(&k_closest[i], &new_k_closest[i]) == 0){
+                // same nodes
+            } else {
                 global_found = 0;
                 break;
             }
         }
 
         if (global_found)
-            break;
+            return 1;
+
+        // else
+        find_k_closest_worker(hash, new_k_closest);
+
+        if (k_closest[i].port == 0)
+            continue;
     }
+    return 0;
+}
+
+
+
+
+
+// recursively call find_node to find the globally closest k nodes to a given hash
+// first find the closest node to that hash in your routing table
+// then recursively query closest nodes received with find node
+void find_k_closest(unsigned char *hash, struct node k_closest_global[K]){
+    struct node k_closest[K];
+    for (int i=0; i<K; i++){
+        intialize_node(&k_closest[i]);
+        intialize_node(&k_closest[i]);
+    }
+
+    int max_retries = 100;
+    for(int t=0; t<max_retries; t++){
+
+        // connect to each node in the previous k_closest set, and ask them for find_node to return you its local k closest nodes
+        // net_find_node(hash, k_closest_global);
+
+        int global_found = 1;
+        for (int i=0; i<K; i++){
+            if (cmp_distance(&k_closest[i], &k_closest_global[i]) == 0){
+                // same nodes
+            } else {
+                global_found = 0;
+                break;
+            }
+        }
+
+        if (global_found)
+            return;
+
+        for (int i=0; i<K; i++){
+            copy_node(&k_closest_global[i], &k_closest[i]);
+        }
+
+    }
+
 }
 
 
@@ -195,6 +243,81 @@ void generate_id(unsigned char *id){
     }
 }
 
+
+int common_prefix_length(unsigned char *hash1, unsigned char *hash2) {
+    int common_bits = 0;
+
+    for (int byte_idx = 0; byte_idx < SHA_DIGEST_LENGTH; byte_idx++) {
+        unsigned char xor_byte = hash1[byte_idx] ^ hash2[byte_idx]; // XOR to find differing bits
+
+        // Check if all bits in this byte are the same
+        if (xor_byte == 0) {
+            common_bits += 8; // All 8 bits are the same
+        } else {
+            // Count common bits in the current byte
+            for (int bit = 7; bit >= 0; bit--) {
+                if (xor_byte & (1 << bit)) {
+                    return common_bits; // Return if a differing bit is found
+                }
+                common_bits++;
+            }
+        }
+    }
+
+    return common_bits; // Return the total common bits (maximum 160)
+}
+
+void update_routing_table(unsigned char *node_id, char *node_ip, unsigned short int node_port){
+    // in kademlia, you would first ping the least recently seen node
+    // if that node responds, then you discard this new node
+    // if it doesn't then you put this new node as the most recently seen node, and discard that old one
+    // but i'm just gonna directly put this node as the most recently seen node
+    if (cmp(node_id, id) == 0){
+        return;
+    }
+
+    int common_prefix = common_prefix_length(node_id, id);
+
+    pthread_mutex_lock(&routing_table_lock);
+    // check if node id already in bucket
+    struct node *cur = routing_table[common_prefix];
+    for (int i=0; i<K; i++){
+        if (cur == NULL)
+            break;
+        if (cmp(cur->node_id, node_id) == 0)
+            return;
+    }
+
+    // shift each node in k bucket 1 step ahead
+    struct node *newnode = (struct node *) malloc(sizeof(struct node));
+    for (int i=0; i<SHA_DIGEST_LENGTH; i++){
+        newnode->node_id[i] = node_id[i];
+    }
+    sscanf(node_ip, "%d,%d.%d.%d", newnode->ip[0], newnode->ip[1], newnode->ip[2], newnode->ip[3]);
+    newnode->port = node_port;
+
+    newnode->next = routing_table[common_prefix];
+    routing_table[common_prefix] = newnode;
+
+    cur = newnode;
+    for (int i=1; i<K; i++){
+        if (cur->next == NULL)
+            break;
+        cur = cur->next;
+    }
+
+    if (cur->next != NULL){
+        free(cur->next);
+        cur->next = NULL;
+    }
+
+    pthread_mutex_unlock(&routing_table_lock);
+
+}
+
+
+
+
 // Use locks when accessing routing table, and other global variables
 void* thread_handler(void *pool){
     struct ThreadPool *threadPool = (struct ThreadPool*) pool; 
@@ -203,13 +326,14 @@ void* thread_handler(void *pool){
         pthread_mutex_lock(&(threadPool->lock));
         if (threadPool->head == -1 && threadPool->tail == -1) { // queue is empty
             // no data to read- put the thread to sleep
-            pthread_cond_wait(&(threadPool->is_empty), &(threadPool->lock)); // will put this thread on sleep and unlock the mutex lock for others to use
+            pthread_cond_wait(&(threadPool->is_not_empty), &(threadPool->lock)); // will put this thread on sleep and unlock the mutex lock for others to use
             pthread_mutex_unlock(&(threadPool->lock));
             continue;
         }
 
         // dequeue
         int newfd = (threadPool->clientqueue)[threadPool->head];
+        struct sockaddr_in *client_addr = (threadPool->clientaddqueue)[threadPool->head];
         threadPool->head++;
         if (threadPool->head == threadPool->tail+1){ // queue got empty
             threadPool->head = -1;
@@ -231,16 +355,63 @@ void* thread_handler(void *pool){
 
         printf("Received: %d\n", msg_code);
 
+        unsigned char node_id[SHA_DIGEST_LENGTH];
+
+        if (msg_code != MSG_GET_ID){
+            // get the node id
+            if ((rbytes = recv(newfd, node_id, SHA_DIGEST_LENGTH*sizeof(char), 0)) < 0){
+                printf("Error while receiving");
+                return NULL;
+            }
+        }
+
         switch (msg_code) {
             case MSG_GET_ID:
-                unsigned char id[SHA_DIGEST_LENGTH];
-                generate_id(id);
-                if (send(newfd, id, sizeof(id), 0) < 0){
+                generate_id(node_id);
+                if (send(newfd, node_id, sizeof(node_id), 0) < 0){
                     printf("Error while sending id");
                 }
                 break;
+
+            case MSG_FIND_NODE:
+                unsigned char hash[SHA_DIGEST_LENGTH];
+                int ret = recv(newfd, hash, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return -1;
+                }
+
+                struct node k_closest[K];
+                find_node(hash, k_closest);
+
+                for (int i=0; i<K; i++){
+                    ret = send(newfd, k_closest[i].node_id, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                    if (ret == -1)
+                    {
+                        printf("Failed to receive message\n");
+                        return -1;
+                    }
+
+                    for (int j=0; j<4; j++){
+                        ret = send(newfd, k_closest[i].ip[j], sizeof(char), 0);
+                        if (ret == -1)
+                        {
+                            printf("Failed to receive message\n");
+                            return -1;
+                        }
+                    }
+
+                    ret = send(newfd, k_closest[i].port, sizeof(unsigned short int), 0);
+                    if (ret == -1)
+                    {
+                        printf("Failed to receive message\n");
+                        return -1;
+                    }
+                }
+
             default:
-                char *msg = "world";
+                char *msg = "error";
                 if (send(newfd, msg, strlen(msg), 0) < 0){
                     printf("Error while sending default message");
                     return NULL;
@@ -252,8 +423,14 @@ void* thread_handler(void *pool){
             printf("Error in closing newfd"); 
             return NULL;
         }
+
+        update_routing_table(node_id, inet_ntoa(client_addr->sin_addr), client_addr->sin_port);
+        free(client_addr);
     }
 }
+
+
+
 
 
 void *start_server(void *server_args){
@@ -289,9 +466,10 @@ void *start_server(void *server_args){
     threadPool->head = -1;
     threadPool->tail = -1;
     pthread_mutex_init(&(threadPool->lock), NULL);
-    pthread_cond_init(&(threadPool->is_empty), NULL);
+    pthread_cond_init(&(threadPool->is_not_empty), NULL);
 
     threadPool->clientqueue = (int *) malloc(threadPool->clientqueue_length * sizeof(int));
+    threadPool->clientaddqueue = (struct sockaddr_in *) malloc(threadPool->clientqueue_length * sizeof(struct sockaddr_in));
 
     threadPool->threadcount = threadcount;
     threadPool->threads = (pthread_t*) malloc(threadPool->threadcount * sizeof(pthread_t));
@@ -319,8 +497,9 @@ void *start_server(void *server_args){
         // enqueue
         if ((threadPool->tail+1)%threadPool->clientqueue_length != threadPool->head){ // queue is not full
             int newfd;
+            struct sockaddr_in *client_sockaddr = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in));
             socklen_t client_sockaddr_length = sizeof(client_sockaddr);
-            if ((newfd = accept(sockfd, (struct sockaddr*) &server_sockaddr, &client_sockaddr_length)) < 0){
+            if ((newfd = accept(sockfd, (struct sockaddr*) &client_sockaddr, &client_sockaddr_length)) < 0){
                 printf("Error in accepting\n");
             }
             if (threadPool->head == -1 && threadPool->tail == -1){ // queue was empty
@@ -328,7 +507,8 @@ void *start_server(void *server_args){
             }
             threadPool->tail = (threadPool->tail+1)%threadPool->clientqueue_length;
             threadPool->clientqueue[threadPool->tail] = newfd;
-            pthread_cond_signal(&(threadPool->is_empty));
+            threadPool->clientaddqueue[threadPool->tail] = client_sockaddr;
+            pthread_cond_signal(&(threadPool->is_not_empty));
         } // else not enough space in the client queue right now
 
         pthread_mutex_unlock(&(threadPool->lock));
@@ -394,7 +574,7 @@ int main(int argc, char **argv) {
 
     } else {
         // request id from a bootstrap node
-        request_id(bootstrap_ip, bootstrap_port, id);
+        net_request_id(bootstrap_ip, bootstrap_port, id);
     }
 
     printf("Got Id: ");

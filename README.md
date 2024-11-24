@@ -58,6 +58,13 @@ Also, alongside this, we can keep on populating our routing table with the nodes
 
 (Alternatively, we can one by one fill our routing table using bootstrap node as well. say we are 1111, simply ask the bootstrap node for k nodes closest to id 0 and 10 and 110 and 1110)
 
+
+currently, when a new node joins a network, it broadcasts a hello message via the bootstrap to whole of its routing table, giving new node's id as sender, to which all other nodes in network reply with hello message back, which helps the current node fill its routing table
+
+
+currently, it only stores a given hash key at one node. I wanted to store them in k closest nodes, and i also wrote a function for that, but sadly that function was not properly working, and i did not have the time to debug it.
+
+
 But after filling its routing table, how am i going to redistribute the keys? Since some keys which are now closest to this newly added node are currently being stored by some of its neighbours
 
 Suppose if a new node is added to the network, due to which a key held by a given old node is now closest to this new node instead. Then how to handle it?
@@ -67,3 +74,7 @@ When a new node joins the network, it announces its k-nearest neighbors about hi
 Also, each node periodically rechecks which keys it is responsible for storing. It does that by executing FIND_NODE to find the global k-closest nodes to a given key. If he gets his own node id in response, then he continues to store that key, as well as issues a store instruction for other k closest nodes to store that key as well. otherwise it drops tha key. (This also helps with redistribution of the keys if a node abruptly left the network without telling its neighbors). It would also help if this node could notify the actual k nodes then, so they don't have to check whether they need to store the key or not.
 
 how does kademlia handle collisions of nodes
+
+But for now, for keeping things simple, when a new node joins, it is gonna broadcast its id and ip in the whole network.
+
+Tradeoff- iterating over whole routing table instead of just 1 bucket to improve accuracy but decrease speed
