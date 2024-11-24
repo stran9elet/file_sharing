@@ -45,6 +45,6 @@ struct hashtable *create_hashtable(unsigned int capacity);
 
 void delete_hashtable(struct hashtable *table);
 
-void insert(struct hashtable *table, const unsigned char *key, unsigned int value);
+void insert(struct hashtable *table, const unsigned char *key, int value);
 
-unsigned int get(struct hashtable *table, const unsigned char *key); // Return UINT_MAX if key not found
+int get(struct hashtable *table, const unsigned char *key); // Return UINT_MAX if key not found

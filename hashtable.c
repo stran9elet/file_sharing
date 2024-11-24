@@ -116,7 +116,7 @@ int get(struct hashtable *table, const unsigned char *key) {
         }
         cur = cur->next;
     }
-    return UINT_MAX; // Return the max value of unsigned int if key not found
+    return INT_MAX; // Return the max value of int if key not found
 }
 
 

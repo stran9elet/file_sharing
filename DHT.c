@@ -11,7 +11,7 @@
 #include <openssl/sha.h>
 
 #include "message_codes.h"
-#include "client.h"
+#include "client_helper.h"
 #include "hashtable.h"
 // #include "node.h"
 
@@ -34,6 +34,9 @@ unsigned short int bootstrap_port;;
 // because there is 1 subtree which differes at path bit 1, one subtree which differs at bit 2, one subtree which differs at bit 3, and so on upto bit 160
 struct node *routing_table[ROUTING_TABLE_SIZE];
 pthread_mutex_t routing_table_lock = PTHREAD_MUTEX_INITIALIZER;
+
+struct hashtable *table;
+pthread_mutex_t hashtable_lock = PTHREAD_MUTEX_INITIALIZER;
 
 struct ThreadPool {
     pthread_t *threads;
@@ -165,6 +168,16 @@ int find_k_closest_worker(unsigned char *hash, struct node k_closest[K]){
     // if new k closest same as old k closest, copy new_k_closest to k_closest and return 1
     int global_found = 1;
     for (int i=0; i<K; i++){
+        if (cmp_distance(k_closest[0].node_id, new_k_closest[i].node_id) == 0){ // if the server to whom we sent to request to was also included in k_closest nodes
+            // then update his ip and port in this element, because he must have sent 0.0.0.0 and 0, because os doesn't know his own ip and port
+            new_k_closest[i].ip[0] = k_closest[i].ip[0];
+            new_k_closest[i].ip[1] = k_closest[i].ip[1];
+            new_k_closest[i].ip[2] = k_closest[i].ip[2];
+            new_k_closest[i].ip[3] = k_closest[i].ip[3];
+
+            new_k_closest[i].port = k_closest[i].port;
+        }
+
         if (!cmp_distance(k_closest[i].node_id, new_k_closest[i].node_id) == 0){
             // different nodes
             global_found = 0;
@@ -194,13 +207,13 @@ int find_k_closest_worker(unsigned char *hash, struct node k_closest[K]){
 // then recursively query closest nodes received with find node
 void find_k_closest(unsigned char *hash, struct node k_closest_global[K]) {
     find_node(hash, k_closest_global);
-    for (int i=0; i<K; i++){
-        printf("port: %d\n", k_closest_global[i].port);
-    }
+    // for (int i=0; i<K; i++){
+    //     printf("port: %d\n", k_closest_global[i].port);
+    // }
     find_k_closest_worker(hash, k_closest_global);
-    for (int i=0; i<K; i++){
-        printf("port: %d\n", k_closest_global[i].port);
-    }
+    // for (int i=0; i<K; i++){
+    //     printf("port: %d\n", k_closest_global[i].port);
+    // }
 }
 
 
@@ -241,7 +254,6 @@ void generate_id(unsigned char *id){
         }
 
         printf("%d\n", already_exists);
-        // sleep(10);
     }
 }
 
@@ -323,22 +335,74 @@ void update_routing_table(unsigned char *node_id, char *node_ip, unsigned short 
 void announce(char *bootstrap_ip, unsigned short int bootstrap_port){
     struct node k_closest[K];
     net_find_node(bootstrap_ip, bootstrap_port, id, k_closest);
+    // bootstrap ip may include himself as a node in this list, but will give IP 0.0.0.0 and port 0 corresponding to it, because he doesn't know his own public ip and port
+    // so change it
+    for (int i=0; i<K; i++){
+        unsigned char zero_id[] = {'\0', '\0', '\0', '\0', '\0'};
+        if (cmp_distance(k_closest[i].node_id, zero_id) != 0 && k_closest[i].port == 0){ // means id not zero but port 0, means this was bootstrap node
+            sscanf(bootstrap_ip, "%d.%d.%d.%d", (int *) &k_closest[i].ip[0], (int *) &k_closest[i].ip[1], (int *) &k_closest[i].ip[2], (int *) &k_closest[i].ip[3]);
+            k_closest[i].port = bootstrap_port;
+        }
+    }
 
     // this will now populate the k_closest list with the global k closest nodes
     find_k_closest_worker(id, k_closest);
-
 
     for (int i=0; i<K; i++){
         if (k_closest[i].port == 0) // to not ping empty node or myself
             continue;
         char ip[16]; // Buffer to store the dotted-decimal format string
         sprintf(ip, "%d.%d.%d.%d", k_closest[0].ip[0], k_closest[0].ip[1], k_closest[0].ip[2], k_closest[0].ip[3]);
-        net_ping(ip, k_closest[i].port, id);
+        net_ping(ip, k_closest[i].port);
     }
 }
 
-void store(){
-    // find the nearest node ids in my routing table to a given hash, and issue store on them
+
+// find the k nearest node ids to a given hash, and issue store on them
+void store(unsigned char *key, int value){
+    struct node k_closest[K];
+    find_k_closest(key, k_closest); // returns the global k closest nodes to the given key
+
+    for (int i=0; i<K; i++){
+        if (cmp_distance(k_closest[i].node_id, id) == 0){
+            // i am also one of the k nearest nodes
+            // so i should also store it
+            pthread_mutex_lock(&hashtable_lock);
+            insert(table, key, value);
+            pthread_mutex_unlock(&hashtable_lock);
+            continue;
+        }
+        if (k_closest[i].port == 0) // to not issue store instruction on empty node or myself
+            continue;
+        char ip[16]; // Buffer to store the dotted-decimal format string
+        sprintf(ip, "%d.%d.%d.%d", k_closest[0].ip[0], k_closest[0].ip[1], k_closest[0].ip[2], k_closest[0].ip[3]);
+        net_store(ip, k_closest[i].port, key, value);
+    }
+}
+
+
+// find the k nearest node ids in my routing table to a given hash, and issue load on them one by one until you get a response from one
+int load(unsigned char *key){
+    struct node k_closest[K];
+    find_k_closest(key, k_closest); // returns the global k closest nodes to the given key
+
+    for (int i=0; i<K; i++){
+        if (cmp_distance(k_closest[i].node_id, id) == 0){
+            // i am also one of the k nearest nodes
+            // so i should also be having the value
+            pthread_mutex_lock(&hashtable_lock);
+            int data = get(table, key);
+            pthread_mutex_unlock(&hashtable_lock);
+            return data;
+        }
+        if (k_closest[i].port == 0) // to not issue store instruction on empty node or myself
+            continue;
+        char ip[16]; // Buffer to store the dotted-decimal format string
+        sprintf(ip, "%d.%d.%d.%d", k_closest[0].ip[0], k_closest[0].ip[1], k_closest[0].ip[2], k_closest[0].ip[3]);
+        int value = net_load(ip, k_closest[i].port, key);
+        if (value < INT_MAX)
+            return value;
+    }
 }
 
 
@@ -390,6 +454,8 @@ void* thread_handler(void *pool){
             }
         }
 
+        int ret, value;
+        unsigned char key[SHA_DIGEST_LENGTH];
         switch (msg_code) {
             case MSG_GET_ID:
                 generate_id(node_id);
@@ -400,7 +466,7 @@ void* thread_handler(void *pool){
 
             case MSG_FIND_NODE:
                 unsigned char hash[SHA_DIGEST_LENGTH];
-                int ret = recv(newfd, hash, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                ret = recv(newfd, hash, SHA_DIGEST_LENGTH * sizeof(char), 0);
                 if (ret == -1)
                 {
                     printf("Failed to receive message\n");
@@ -437,11 +503,83 @@ void* thread_handler(void *pool){
                 break;
 
             case MSG_PING: // just pong back
-                net_pong(inet_ntoa(client_addr->sin_addr), client_addr->sin_port, id);
-            break;
+                net_pong(inet_ntoa(client_addr->sin_addr), client_addr->sin_port);
+                break;
 
             case MSG_PONG: // do nothing, routing table will be automatically updated later
-            break;
+                break;
+
+            case MSG_STORE:
+                ret = recv(newfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return NULL;
+                }
+                ret = recv(newfd, &value, sizeof(int), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return NULL;
+                }
+                pthread_mutex_lock(&hashtable_lock);
+                insert(table, key, value);
+                pthread_mutex_unlock(&hashtable_lock);
+                break;
+
+            case MSG_LOAD:
+                ret = recv(newfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return NULL;
+                }
+
+                pthread_mutex_lock(&hashtable_lock);
+                value = get(table, key);
+                pthread_mutex_unlock(&hashtable_lock);
+
+                ret = send(newfd, &value, sizeof(int), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to send message\n");
+                    return NULL;
+                }
+                break;
+
+            case MSG_INSERT:
+                ret = recv(newfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return NULL;
+                }
+                ret = recv(newfd, &value, sizeof(int), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return NULL;
+                }
+                store(key, value);
+                break;
+
+            case MSG_GET:
+                ret = recv(newfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to receive message\n");
+                    return NULL;
+                }
+
+                value = load(key);
+
+                ret = send(newfd, &value, sizeof(int), 0);
+                if (ret == -1)
+                {
+                    printf("Failed to send message\n");
+                    return NULL;
+                }
+                break;
 
             default:
                 char *msg = "error";
@@ -457,12 +595,11 @@ void* thread_handler(void *pool){
             return NULL;
         }
 
-        update_routing_table(node_id, inet_ntoa(client_addr->sin_addr), client_addr->sin_port);
+        if (msg_code != MSG_INSERT && msg_code != MSG_GET)
+            update_routing_table(node_id, inet_ntoa(client_addr->sin_addr), client_addr->sin_port);
         free(client_addr);
     }
 }
-
-
 
 
 
@@ -567,7 +704,6 @@ void *start_server(void *server_args){
 
 
 
-
 // give any 1 argument to make this node bootstrap
 // usage 1-> to make own bootstrap, 2-> to connect to an other bootstrap
 // ./DHT bootstrap <self_port>
@@ -588,8 +724,11 @@ int main(int argc, char **argv) {
         self_port = atoi(argv[3]);
     }
 
+    printf("Initializing hash table\n");
+    table = create_hashtable(INIT_CAPACITY);
+
     // initialize the routing table
-    printf("Initializeing routing table\n");
+    printf("Initializing routing table\n");
     for (int i=0; i<ROUTING_TABLE_SIZE; i++){
         routing_table[i] = NULL;
     }

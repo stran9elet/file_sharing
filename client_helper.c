@@ -1,7 +1,6 @@
 // the first thing every node sends is the message code, followed by his own source node id, and after that the actual message body
 
-#include <openssl/sha.h>
-#include "client.h"
+#include "client_helper.h"
 #include "message_codes.h"
 // #include "node.h"
 
@@ -129,7 +128,6 @@ int net_find_node(char *server_ip, unsigned short int server_port, unsigned char
                 return -1;
             }
         }
-
         
         ret = recv(servfd, &k_closest[i].port, sizeof(unsigned short int), 0);
         if (ret == -1)
@@ -141,12 +139,11 @@ int net_find_node(char *server_ip, unsigned short int server_port, unsigned char
     }
 
     return 0;
-
 }
 
 
 
-int net_ping(char *server_ip, unsigned short int server_port, unsigned char *my_id){
+int net_ping(char *server_ip, unsigned short int server_port){
     int servfd;
     if ((servfd = connect_to_server(server_ip, server_port)) < 0){
         printf("could not connect to server %s:%d\n", server_ip, server_port);
@@ -159,7 +156,7 @@ int net_ping(char *server_ip, unsigned short int server_port, unsigned char *my_
     }
 }
 
-int net_pong(char *server_ip, unsigned short int server_port, unsigned char *my_id){
+int net_pong(char *server_ip, unsigned short int server_port){
     int servfd;
     if ((servfd = connect_to_server(server_ip, server_port)) < 0){
         printf("could not connect to server %s:%d\n", server_ip, server_port);
@@ -173,75 +170,136 @@ int net_pong(char *server_ip, unsigned short int server_port, unsigned char *my_
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-int start_client(char *ip, int port)
-{
-    int sock, ret;
-    struct sockaddr_in serv_addr;
-    char *message = "hello";
-    char buffer[BUF_SIZE] = {0};
-
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        printf("Socket creation error\n");
+int net_store(char *server_ip, unsigned short int server_port, unsigned char *key, int value){
+    int servfd;
+    if ((servfd = connect_to_server(server_ip, server_port)) < 0){
+        printf("could not connect to server %s:%d\n", server_ip, server_port);
         return -1;
     }
 
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-
-    // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, ip, &serv_addr.sin_addr) <= 0)
-    {
-        printf("Invalid address/ Address not supported\n");
+    if (send_credentials(servfd, MSG_STORE, id) < 0){
+        printf("Failed to send message credentials\n");
         return -1;
     }
 
-    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
-    {
-        printf("Connection Failed\n");
-        return -1;
-    }
-
-    ret = send(sock, message, strlen(message), 0);
+    int ret = send(servfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
     if (ret == -1)
     {
         printf("Failed to send message\n");
         return -1;
     }
-    printf("Sent: %s\n", message);
 
-    ret = recv(sock, buffer, BUF_SIZE, 0);
+    ret = send(servfd, &value, sizeof(int), 0);
+    if (ret == -1)
+    {
+        printf("Failed to send message\n");
+        return -1;
+    }
+
+}
+
+
+int net_load(char *server_ip, unsigned short int server_port, unsigned char *key){
+    int servfd;
+    if ((servfd = connect_to_server(server_ip, server_port)) < 0){
+        printf("could not connect to server %s:%d\n", server_ip, server_port);
+        return -1;
+    }
+
+    if (send_credentials(servfd, MSG_STORE, id) < 0){
+        printf("Failed to send message credentials\n");
+        return -1;
+    }
+
+    int ret = send(servfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+    if (ret == -1)
+    {
+        printf("Failed to send message\n");
+        return -1;
+    }
+
+    // returns INT_MAX if key not found
+    int value;
+    ret = recv(servfd, &value, sizeof(int), 0);
     if (ret == -1)
     {
         printf("Failed to receive message\n");
         return -1;
     }
-    printf("Received: %s\n", buffer);
 
-    close(sock);
-
-    return 0;
+    // returns INT_MAX if key not found
+    return value;
 }
+
+
+
+// store will directly command the server to store key
+// whereas insert will tell the server to find the appropriate node and tell him to store the key
+int net_insert(char *server_ip, unsigned short int server_port, char *hashkey, int value){
+
+    unsigned char key[SHA_DIGEST_LENGTH];
+    SHA1((unsigned char *)hashkey, strlen(hashkey), key);
+
+    int servfd;
+    if ((servfd = connect_to_server(server_ip, server_port)) < 0){
+        printf("could not connect to server %s:%d\n", server_ip, server_port);
+        return -1;
+    }
+
+    if (send_credentials(servfd, MSG_INSERT, id) < 0){
+        printf("Failed to send message credentials\n");
+        return -1;
+    }
+
+    int ret = send(servfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+    if (ret == -1)
+    {
+        printf("Failed to send message\n");
+        return -1;
+    }
+
+    ret = send(servfd, &value, sizeof(int), 0);
+    if (ret == -1)
+    {
+        printf("Failed to send message\n");
+        return -1;
+    }
+}
+
+
+int net_get(char *server_ip, unsigned short int server_port, char *hashkey){
+
+    unsigned char key[SHA_DIGEST_LENGTH];
+    SHA1((unsigned char *)hashkey, strlen(hashkey), key);
+
+    int servfd;
+    if ((servfd = connect_to_server(server_ip, server_port)) < 0){
+        printf("could not connect to server %s:%d\n", server_ip, server_port);
+        return -1;
+    }
+
+    if (send_credentials(servfd, MSG_STORE, id) < 0){
+        printf("Failed to send message credentials\n");
+        return -1;
+    }
+
+    int ret = send(servfd, key, SHA_DIGEST_LENGTH * sizeof(char), 0);
+    if (ret == -1)
+    {
+        printf("Failed to send message\n");
+        return -1;
+    }
+
+    // returns INT_MAX if key not found
+    int value;
+    ret = recv(servfd, &value, sizeof(int), 0);
+    if (ret == -1)
+    {
+        printf("Failed to receive message\n");
+        return -1;
+    }
+
+    // returns INT_MAX if key not found
+    return value;
+}
+
