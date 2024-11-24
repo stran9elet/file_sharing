@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#include "node.h"
+
 
 #define BUF_SIZE 1024
 #define K 20
