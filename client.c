@@ -50,7 +50,14 @@ int send_credentials(int servfd, int msg_code, unsigned char *my_id){
     if (msg_code == MSG_GET_ID)
         return 0;
 
-    
+    ret = send(servfd, my_id, SHA_DIGEST_LENGTH * sizeof(char), 0);
+    if (ret == -1)
+    {
+        printf("Failed to send message\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 
@@ -79,6 +86,7 @@ int net_request_id(char *bootstrap_ip, unsigned short int bootstrap_port, unsign
 }
 
 // issue a find node request to a server on your network
+// TODO: if the node you requested to is also in the response, append its ip and port to it
 int net_find_node(char *server_ip, unsigned short int server_port, unsigned char *hash, struct node k_closest[K]){
     for (int i=0; i<K; i++){
         intialize_node(&k_closest[i]);
@@ -138,7 +146,31 @@ int net_find_node(char *server_ip, unsigned short int server_port, unsigned char
 
 
 
+int net_ping(char *server_ip, unsigned short int server_port, unsigned char *my_id){
+    int servfd;
+    if ((servfd = connect_to_server(server_ip, server_port)) < 0){
+        printf("could not connect to server %s:%d\n", server_ip, server_port);
+        return -1;
+    }
 
+    if (send_credentials(servfd, MSG_PING, id) < 0){
+        printf("Failed to send message credentials\n");
+        return -1;
+    }
+}
+
+int net_pong(char *server_ip, unsigned short int server_port, unsigned char *my_id){
+    int servfd;
+    if ((servfd = connect_to_server(server_ip, server_port)) < 0){
+        printf("could not connect to server %s:%d\n", server_ip, server_port);
+        return -1;
+    }
+
+    if (send_credentials(servfd, MSG_PONG, id) < 0){
+        printf("Failed to send message credentials\n");
+        return -1;
+    }
+}
 
 
 

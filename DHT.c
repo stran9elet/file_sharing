@@ -12,6 +12,7 @@
 
 #include "message_codes.h"
 #include "client.h"
+#include "hashtable.h"
 // #include "node.h"
 
 # define K 20
@@ -82,8 +83,7 @@ int find_node(unsigned char *hash, struct node k_closest[K]){
     struct node myself;
     intialize_node(&myself);
     for (int i=0; i<SHA_DIGEST_LENGTH; i++)
-        myself.node_id[i] = id[i]; // not adding the IP address because OS doesn't know self's IP. So the calling node will have to determine that from his own routing table since he called me directly and must've known my address
-
+        myself.node_id[i] = id[i]; // not adding the IP address because OS doesn't know self's IP. So the calling node will have to determine that from his own routing table since he called me directly and must've known my address    
     struct node *cur;
 
     int last_idx = 0;
@@ -159,7 +159,7 @@ int find_k_closest_worker(unsigned char *hash, struct node k_closest[K]){
         return 0; // didn't find any k closest node
 
     char ip[16]; // Buffer to store the dotted-decimal format string
-    sprintf(ip, "%d.%d.%d.%d", k_closest[0].ip[0], k_closest[0].ip[2], k_closest[0].ip[1], k_closest[0].ip[3]);
+    sprintf(ip, "%d.%d.%d.%d", k_closest[0].ip[0], k_closest[0].ip[1], k_closest[0].ip[2], k_closest[0].ip[3]);
     net_find_node(ip, k_closest[0].port, hash, new_k_closest);
 
     // if new k closest same as old k closest, copy new_k_closest to k_closest and return 1
@@ -234,9 +234,6 @@ void generate_id(unsigned char *id){
         }
         printf("Finding k closest nodes to generate id...\n");
         find_k_closest(id, k_nearest);
-
-        printf("My id: ");
-        print_hash(id);
 
         // because k_nearest[0] will always be my own node id
         if (cmp_distance(id, k_nearest[1].node_id) != 0){
@@ -322,6 +319,29 @@ void update_routing_table(unsigned char *node_id, char *node_ip, unsigned short 
 
 
 
+// used by a node to first find its k nearest nodes, then ping them so that they add her to their routing tables, and return a response so that i can add them to my routing table.
+void announce(char *bootstrap_ip, unsigned short int bootstrap_port){
+    struct node k_closest[K];
+    net_find_node(bootstrap_ip, bootstrap_port, id, k_closest);
+
+    // this will now populate the k_closest list with the global k closest nodes
+    find_k_closest_worker(id, k_closest);
+
+
+    for (int i=0; i<K; i++){
+        if (k_closest[i].port == 0) // to not ping empty node or myself
+            continue;
+        char ip[16]; // Buffer to store the dotted-decimal format string
+        sprintf(ip, "%d.%d.%d.%d", k_closest[0].ip[0], k_closest[0].ip[1], k_closest[0].ip[2], k_closest[0].ip[3]);
+        net_ping(ip, k_closest[i].port, id);
+    }
+}
+
+void store(){
+    // find the nearest node ids in my routing table to a given hash, and issue store on them
+}
+
+
 // Use locks when accessing routing table, and other global variables
 void* thread_handler(void *pool){
     struct ThreadPool *threadPool = (struct ThreadPool*) pool; 
@@ -347,9 +367,10 @@ void* thread_handler(void *pool){
 
         pthread_mutex_unlock(&(threadPool->lock));
 
+        // the messages we receive will first contain a message code
+        // followed by that client's node id (except for in case of MSG_GET_ID)
+        // and then the actual message
 
-        // parse the message and send the response
-        // char buffer[BUF_SIZE] = {0};
         int rbytes;
         int msg_code;
         if ((rbytes = recv(newfd, &msg_code, sizeof(int), 0)) < 0){
@@ -413,6 +434,14 @@ void* thread_handler(void *pool){
                         return NULL;
                     }
                 }
+                break;
+
+            case MSG_PING: // just pong back
+                net_pong(inet_ntoa(client_addr->sin_addr), client_addr->sin_port, id);
+            break;
+
+            case MSG_PONG: // do nothing, routing table will be automatically updated later
+            break;
 
             default:
                 char *msg = "error";
@@ -539,19 +568,11 @@ void *start_server(void *server_args){
 
 
 
-
-
-
-
-
 // give any 1 argument to make this node bootstrap
 // usage 1-> to make own bootstrap, 2-> to connect to an other bootstrap
 // ./DHT bootstrap <self_port>
 // ./DHT <bootstrap_ip> <bootstrap_port> <self_port>
 int main(int argc, char **argv) {
-    // unsigned char hash1[5] = {'a', 'a', 'a', 'a', 'a'};
-    // unsigned char hash2[5] = {'a', 'a', 'a', 'b', 'a'};
-    // printf("%u\n", xor_distance(hash1, hash2));
 
     if (argc < 2 || argc > 4) {
         printf("Usage: \n./DHT bootstrap <self_port> \nor \n./DHT <bootstrap_ip> <bootstrap_port> <self_port> \n");
@@ -585,6 +606,7 @@ int main(int argc, char **argv) {
         // request id from a bootstrap node
         printf("Requesting ID from bootstrap\n");
         net_request_id(bootstrap_ip, bootstrap_port, id);
+        announce(bootstrap_ip, bootstrap_port); // ping the k closest nodes about my presence, to update their and my routing tables
     }
 
     printf("Got Id: ");
@@ -593,15 +615,15 @@ int main(int argc, char **argv) {
 
 
     pthread_t server_thread;
-    // sedrvedr args- port, threadcount and length of client queue
+    // server args- port, threadcount and length of client queue
     int server_args[] = {5000, 10, 10000};
     pthread_create(&server_thread, NULL, start_server, (void *) &server_args);
 
-    start_client("127.0.0.1", 5000);
-    sleep(1);
-    start_client("127.0.0.1", 5000);
-    sleep(1);
-    start_client("127.0.0.1", 5000);
+    // start_client("127.0.0.1", 5000);
+    // sleep(1);
+    // start_client("127.0.0.1", 5000);
+    // sleep(1);
+    // start_client("127.0.0.1", 5000);
 
     pthread_join(server_thread, NULL);
     return 0;
